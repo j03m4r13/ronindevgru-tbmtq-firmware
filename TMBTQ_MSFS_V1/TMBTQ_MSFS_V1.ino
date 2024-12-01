@@ -34,8 +34,10 @@ Joystick_ Joystick(
 );
 
 bool sequenceActive = false;         // Track if the sequence is running
-unsigned long sequenceStartTime = 0; // Timer for the sequence
+bool sequenceHiLoActive = false;     // Track for Hi to Lo sequence
+unsigned long sequenceStartTime = 0, sequenceHiLoStartTime = 0;; // Timer for the sequence
 int sequenceStep = 0;                // Track the current step of the sequence
+int sequenceHiLoStep = 0; 
 bool idleLoTriggered = false;        // Track if Idle Low was triggered
 unsigned long lastButton2PressTime = 0; // Track last Idle Low button press
 unsigned long lastAnalogReadTime = 0;   // Track the last time we read A0, A1, A2, A3
@@ -43,6 +45,10 @@ unsigned long lastAnalogReadTime = 0;   // Track the last time we read A0, A1, A
 bool button3State = false;  // Initial state of Button 3 (HI_IDLE) set to true
 bool button4State = false; // Initial state of Button 4 (FLIGHT_IDLE)
 bool flightIdleActive = false; // Keep track of Flight Idle state to maintain smooth reads
+bool frmLtoR = false;
+bool frmRtoL = false;
+bool frmCutOff = false;
+bool frmHIIdle = false;
 
 int smoothAxisValue(int pin, int smoothingReads) {
   int totalValue = 0;
@@ -81,10 +87,11 @@ void loop() {
   static bool fromCutOfftoLoIdleSeq = false;
 
   
-  if (!sequenceActive && !hiLoSequence && !loHiSequence) {
+  if (!sequenceActive && !sequenceHiLoActive && !hiLoSequence && !loHiSequence) {
     if (!digitalRead(PIN_HI_IDLE)) { // Button 3 pressed (HI_IDLE)
+      frmHIIdle = true;
+      frmCutOff = false;
       button3State = true;
-      //button4State = false;
       flightIdleActive = false;   // Flight Idle becomes inactive
       analogReadInterval = 300;  // Slow analog reads when HI_IDLE is active
       Joystick.setRxAxis(0);    //FOR PROPELLER 1 AXIS
@@ -93,7 +100,6 @@ void loop() {
     }
 
     if (!digitalRead(PIN_FLIGHT_IDLE) || flightIdleActive) { // Button 4 pressed or was previously pressed
-      //button3State = false;
       button4State = true;
       flightIdleActive = true;    // Maintain Flight Idle active
       analogReadInterval = 50;    // Fast analog reads for smoother axis when FLIGHT_IDLE is active
@@ -101,6 +107,7 @@ void loop() {
     } else {
       button4State = false;
     }
+
     if (button3State == true && button3State != button3PrevState) { // perform lo idle to hi idle sequence
       hiLoSequence = true;
       loHiTimeElapsed = millis();
@@ -112,10 +119,11 @@ void loop() {
     
     Joystick.setButton(3, button4State); // Set Button 4 (FLIGHT_IDLE)
   }
+
   button3PrevState = button3State;
-  if (hiLoSequence && !sequenceActive) {
+
+  if (hiLoSequence && !sequenceActive && !sequenceHiLoActive) {
       if (millis() - loHiTimeElapsed >= 0) {
-      // Step 1: Press bt1 (Cutoff) for 1 second
       Joystick.setButton(1, 1); // Press Button 2 
       if (millis() - loHiTimeElapsed >= 500) {  // After 1 second
         Joystick.setButton(1, 0); // Press Button 2 
@@ -125,9 +133,9 @@ void loop() {
       }
     }
   }
+
   if (loHiSequence) {
         if (millis() - loHiTimeElapsed >= 0) {
-      // Step 1: Press bt1 (Cutoff) for 1 second
       Joystick.setButton(2, 1); // Press Button 3
       if (millis() - loHiTimeElapsed >= 150) {  // After 1 second
         Joystick.setButton(2, 0); // Release Button 3
@@ -139,10 +147,11 @@ void loop() {
   }
 
   // Handle Cutoff (Button 1) as normal, press/release directly
-  if (digitalRead(PIN_FUEL_CUTOFF) == LOW && !sequenceActive) {
-
+  if (digitalRead(PIN_FUEL_CUTOFF) == LOW && !sequenceActive && !sequenceHiLoActive) {
+      frmHIIdle = false;
+      frmCutOff = true;
     Joystick.setButton(0, 1);  // Press Button 1 (bt1) as long as it's pressed
-  } else if (!sequenceActive) {
+  } else if (!sequenceActive && !sequenceHiLoActive) {
 
     Joystick.setButton(0, 0);  // Release Button 1 (bt1) when not pressed
   }
@@ -151,20 +160,26 @@ void loop() {
   bool button2CurrentState = digitalRead(PIN_LO_IDLE);
 
   // Debounce check for Idle Low button
-  if (button2CurrentState == LOW && (currentTime - lastButton2PressTime > DEBOUNCE_DELAY)) {
+  if (button2CurrentState == LOW && (currentTime - lastButton2PressTime > DEBOUNCE_DELAY) && frmCutOff) {
     if (!sequenceActive && !idleLoTriggered) {
       sequenceActive = true;         // Activate the sequence
       idleLoTriggered = true;        // Mark that Idle Low was triggered
       sequenceStartTime = millis();  // Start the timer for the sequence
       sequenceStep = 1;              // Start with Step 1
-
-
+    }
+    lastButton2PressTime = currentTime;  // Update the last button press time
+  } else if (button2CurrentState == LOW && (currentTime - lastButton2PressTime > DEBOUNCE_DELAY) && frmHIIdle) {
+    if (!sequenceHiLoActive) {
+      sequenceHiLoActive = true;         // Activate the sequence
+      sequenceHiLoStartTime = millis();  // Start the timer for the sequence
+      sequenceHiLoStep = 1;              // Start with Step 1
     }
     lastButton2PressTime = currentTime;  // Update the last button press time
   }
+
   button2PrevState = button2CurrentState;
 
-  // Run the sequence if it's active
+  // Run the Cutoff to Lo sequence if it's active
   if (sequenceActive) {
     // Suspend analog reads during the sequence to avoid interference
     if (sequenceStep == 1 && millis() - sequenceStartTime >= 0) {
@@ -174,6 +189,7 @@ void loop() {
         Joystick.setButton(0, 0); // Release Button 1 (bt1)
         sequenceStep = 2;         // Move to Step 2
         sequenceStartTime = millis(); // Reset the timer for Step 2
+        
       }
     }
 
@@ -188,6 +204,27 @@ void loop() {
     }
   }
 
+
+  // Run the sequence for Hi to Lo if it's active
+  if (sequenceHiLoActive) {
+    // Suspend analog reads during the sequence to avoid interference
+    if (sequenceHiLoStep == 1 && millis() - sequenceHiLoStartTime >= 0) {
+      // Step 1: Press bt1 (Cutoff) for 1 second
+      Joystick.setButton(0, 1); // Press Button 11 (bt1) for the sequence
+      //Joystick.setXAxis(1);    //FOR PROPELLER 1 AXIS
+      //Joystick.setRxAxis(0);    //FOR PROPELLER 1 AXIS
+      if (millis() - sequenceHiLoStartTime >= 150) {  // After 1 second
+        Joystick.setButton(0, 0); // Release Button 11 (bt1)
+        //Joystick.setXAxis(12);    //FOR PROPELLER 1 AXIS
+        sequenceHiLoStep = 2;         // Move to Step 2
+        sequenceHiLoStartTime = millis(); // Reset the timer for Step 2
+        frmHIIdle = false;
+        sequenceHiLoActive = false;    // End the sequence
+      }
+    }
+
+  }
+
   // Reset the Idle Low trigger when the button is released
   if (button2CurrentState == HIGH && !sequenceActive) {
     idleLoTriggered = false;  // Allow Idle Low to trigger the sequence again
@@ -200,10 +237,8 @@ void loop() {
     //int yValue = smoothAxisValue(ANALOG_PIN_Y, SMOOTHING_READS);  // Smooth read for Y-axis
    // int zValue = smoothAxisValue(ANALOG_PIN_Z, SMOOTHING_READS);  // Smooth read for Z-axis
     //int rxValue = smoothAxisValue(ANALOG_PIN_X, SMOOTHING_READS); // Smooth read for Rx-axis
-    //Serial.println(xValue);
+
     Joystick.setXAxis(xValue);
-
-
     lastAnalogReadTime = currentTime;  // Update the last analog read time
   }
 
